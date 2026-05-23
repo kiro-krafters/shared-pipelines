@@ -84,7 +84,7 @@ jobs:
 
       - name: Get AWS Account Number
         run: |
-          ACTUAL_ACCOUNT_NUMBER=${{vars.AWS_ACCOUNT_NUMBER}}
+          ACTUAL_ACCOUNT_NUMBER="${{ vars.AWS_ACCOUNT_NUMBER }}"
 
           if [ -z "$ACTUAL_ACCOUNT_NUMBER" ]; then
             echo "Account number not found"
@@ -236,7 +236,7 @@ jobs:
 
       - name: Get AWS Account Number
         run: |
-          ACTUAL_ACCOUNT_NUMBER=${{vars.AWS_ACCOUNT_NUMBER}}
+          ACTUAL_ACCOUNT_NUMBER="${{ vars.AWS_ACCOUNT_NUMBER }}"
 
           if [ -z "$ACTUAL_ACCOUNT_NUMBER" ]; then
             echo "Account number not found"
