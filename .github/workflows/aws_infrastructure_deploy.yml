@@ -19,10 +19,6 @@ on:
         description: "Environment name"
         required: true
         type: string
-    secrets:
-      SSH_PRIVATE_KEY:
-        description: "SSH private key for secure file access"
-        required: true
 
 permissions:
   id-token: write
@@ -37,11 +33,6 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Setup SSH Key for Private Modules
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Install Dependencies
         run: |
@@ -162,11 +153,6 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Setup SSH Key for Private Modules
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Install Dependencies
         run: |
