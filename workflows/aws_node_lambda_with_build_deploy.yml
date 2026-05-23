@@ -1,0 +1,269 @@
+name: AWS Lambda Deployment with Node.js Build
+on:
+  workflow_call:
+    inputs:
+      AWS_REGION:
+        required: true
+        type: string
+      REGION_PREFIX:
+        required: true
+        type: string
+      FUNCTION_DIR:
+        required: true
+        type: string
+      ENV:
+        required: true
+        type: string
+      LAMBDA_FUNCTION_NAME:
+        required: true
+        type: string
+      NODE_VERSION:
+        required: true
+        type: string
+    secrets:
+      SSH_PRIVATE_KEY:
+        description: "SSH private key for secure repository access"
+        required: true
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    environment: ${{ inputs.ENV }}
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Debug Inputs and Event Info
+        run: |
+          echo "ENV: ${{ inputs.ENV }}"
+          echo "AWS_REGION: ${{ inputs.AWS_REGION }}"
+          echo "LAMBDA_FUNCTION_NAME: ${{ inputs.LAMBDA_FUNCTION_NAME }}"
+          echo "FUNCTION_DIR: ${{ inputs.FUNCTION_DIR }}"
+          echo "NODE_VERSION: ${{ inputs.NODE_VERSION }}"
+          echo "Event Name: ${{ github.event_name }}"
+          echo "GitHub Ref: ${{ github.ref }}"
+          echo "GitHub Ref Name: ${{ github.ref_name }}"
+          echo "GitHub Ref Type: ${{ github.ref_type }}"
+
+      - name: Install SSH Client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client
+
+      - name: Configure SSH for Git
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_AUTH_SOCK: ""
+        run: |
+          if [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "Error: SSH_PRIVATE_KEY is empty"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          # Write SSH key
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # Add GitHub to known hosts
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+          # Create SSH config
+          cat > ~/.ssh/config << 'EOF'
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/id_rsa
+            StrictHostKeyChecking no
+            UserKnownHostsFile ~/.ssh/known_hosts
+            IdentitiesOnly yes
+          EOF
+          chmod 600 ~/.ssh/config
+          # Configure Git
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global core.sshCommand "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
+
+      - name: Checkout Source Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+
+      - name: Set Account Number
+        id: set-account
+        run: |
+          echo "AWS_ACCOUNT_NUMBER=${{ vars.AWS_ACCOUNT_NUMBER }}" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_NUMBER }}:role/${{ vars.DEPLOYMENT_ROLE }}
+          role-session-name: GitHubActionsOIDCSession
+          aws-region: ${{ inputs.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Setup Node.js ${{ inputs.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.NODE_VERSION }}
+
+      - name: Verify Function Directory
+        run: |
+          ls -la ${{ inputs.FUNCTION_DIR }}
+          if [ ! -d "${{ inputs.FUNCTION_DIR }}" ]; then
+            echo "Error: Directory ${{ inputs.FUNCTION_DIR }} does not exist"
+            exit 1
+          fi
+
+      - name: Install Node Dependencies
+        working-directory: ${{ inputs.FUNCTION_DIR }}
+        run: npm install
+
+      - name: Build
+        working-directory: ${{ inputs.FUNCTION_DIR }}
+        run: npm run build
+
+      - name: Zip Lambda Function Files
+        working-directory: ${{ inputs.FUNCTION_DIR }}
+        run: |
+          mkdir -p ../artifacts/function && cp ./.serverless/lambda.zip ../artifacts/function/
+
+      - name: Upload Lambda Zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-zip-${{ inputs.REGION_PREFIX }}
+          path: artifacts/function/lambda.zip
+          retention-days: 1
+
+      - name: Comment PR with Build Info
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `Lambda function build completed for ${{ inputs.LAMBDA_FUNCTION_NAME }} in ${{ inputs.ENV }} environment. Ready for review.`
+            })
+  deploy:
+    runs-on: ubuntu-22.04
+    environment: ${{ inputs.ENV }}
+    needs: build
+    # if: |
+    #   github.event_name == 'release' ||
+    #   github.event_name == 'workflow_dispatch' ||
+    #   (github.event_name == 'push' && contains(fromJSON('["refs/heads/main", "refs/heads/develop", "refs/heads/master"]'), github.ref)) ||
+    #   (github.event_name == 'pull_request' && inputs.ENV != 'prd')
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Debug Deploy Conditions
+        run: |
+          echo "Deploy job starting..."
+          echo "Event Name: ${{ github.event_name }}"
+          echo "GitHub Ref: ${{ github.ref }}"
+          echo "GitHub Ref Type: ${{ github.ref_type }}"
+          echo "Environment: ${{ inputs.ENV }}"
+          echo "Should deploy: true (since this job is running)"
+
+      - name: Install SSH Client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client
+
+      - name: Configure SSH for Git
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_AUTH_SOCK: ""
+        run: |
+          if [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "Error: SSH_PRIVATE_KEY is empty"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          # Write SSH key
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # Add GitHub to known hosts
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+          # Create SSH config
+          cat > ~/.ssh/config << 'EOF'
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/id_rsa
+            StrictHostKeyChecking no
+            UserKnownHostsFile ~/.ssh/known_hosts
+            IdentitiesOnly yes
+          EOF
+          chmod 600 ~/.ssh/config
+          # Configure Git
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global core.sshCommand "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
+
+      - name: Checkout Source Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+
+      - name: Set Account Number
+        id: set-account
+        run: |
+          echo "AWS_ACCOUNT_NUMBER=${{ vars.AWS_ACCOUNT_NUMBER }}" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_NUMBER }}:role/${{ vars.DEPLOYMENT_ROLE }}
+          role-session-name: GitHubActionsOIDCSession
+          aws-region: ${{ inputs.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Download Lambda Zip Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-zip-${{ inputs.REGION_PREFIX }}
+          path: artifacts/function
+
+      - name: Deploy Lambda Function
+        run: |
+          echo "Updating Lambda function code..."
+          echo "Function: ${{ inputs.LAMBDA_FUNCTION_NAME }}"
+          echo "Region: ${{ inputs.AWS_REGION }}"
+          echo "Environment: ${{ inputs.ENV }}"
+          if [ -z "${{ inputs.LAMBDA_FUNCTION_NAME }}" ]; then
+            echo "Error: LAMBDA_FUNCTION_NAME is not set"
+            exit 1
+          fi
+          if [[ -f artifacts/function/lambda.zip ]]; then
+            echo "Deploying lambda.zip to function ${{ inputs.LAMBDA_FUNCTION_NAME }}..."
+            aws lambda update-function-code \
+              --function-name "${{ inputs.LAMBDA_FUNCTION_NAME }}" \
+              --zip-file fileb://artifacts/function/lambda.zip \
+              --region "${{ inputs.AWS_REGION }}"
+            echo "Lambda function deployment complete."
+          else
+            echo "Error: Lambda zip file not found"
+            ls -la artifacts/function/
+            exit 1
+          fi
+
+      - name: Verify Deployment
+        run: |
+          echo "Verifying Lambda function deployment..."
+          aws lambda get-function \
+            --function-name "${{ inputs.LAMBDA_FUNCTION_NAME }}" \
+            --region "${{ inputs.AWS_REGION }}" \
+            --query 'Configuration.[FunctionName,State,LastModified,CodeSize]' \
+            --output table
+          echo "Deployment verification complete."

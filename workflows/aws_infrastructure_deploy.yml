@@ -1,0 +1,286 @@
+name: AWS Infrastructure Provisioning
+
+on:
+  workflow_call:
+    inputs:
+      WORKING_DIRECTORY:
+        description: "Working directory for OpenTofu"
+        required: true
+        type: string
+      ENVIRONMENTS_CONFIG_DIR:
+        description: "Directory for environment configs"
+        required: true
+        type: string
+      AWS_REGION:
+        description: "AWS region"
+        required: true
+        type: string
+      CI_ENVIRONMENT_NAME:
+        description: "Environment name"
+        required: true
+        type: string
+    secrets:
+      SSH_PRIVATE_KEY:
+        description: "SSH private key for secure file access"
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    name: OpenTofu Plan
+    runs-on: ubuntu-22.04
+    environment: ${{ inputs.CI_ENVIRONMENT_NAME }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget git curl python3 python3-pip jq unzip bash awscli openssh-client
+          wget https://github.com/opentofu/opentofu/releases/download/v1.9.0/tofu_1.9.0_linux_amd64.zip
+          unzip -o tofu_1.9.0_linux_amd64.zip
+          sudo mv tofu /usr/local/bin/
+          rm tofu_1.9.0_linux_amd64.zip
+          pip3 install awscli
+          export PATH=$PATH:/home/runner/.local/bin
+
+      - name: Configure SSH for Git
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_AUTH_SOCK: ""
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Write SSH key
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          # Add GitHub to known hosts
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
+          # Create SSH config
+          cat > ~/.ssh/config << 'EOF'
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/id_rsa
+            StrictHostKeyChecking no
+            UserKnownHostsFile ~/.ssh/known_hosts
+            IdentitiesOnly yes
+          EOF
+          chmod 600 ~/.ssh/config
+
+          # Configure Git
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global core.sshCommand "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
+
+      - name: Get AWS Account Number
+        run: |
+          ACTUAL_ACCOUNT_NUMBER=${{vars.AWS_ACCOUNT_NUMBER}}
+
+          if [ -z "$ACTUAL_ACCOUNT_NUMBER" ]; then
+            echo "Account number not found"
+            exit 1
+          fi
+
+          echo "ACTUAL_ACCOUNT_NUMBER=${ACTUAL_ACCOUNT_NUMBER}" >> $GITHUB_ENV
+          echo "Configuring AWS credentials for account: $ACTUAL_ACCOUNT_NUMBER"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.ACTUAL_ACCOUNT_NUMBER }}:role/${{ vars.SHARED_DEPLOYMENT_ROLE }}
+          role-session-name: GitHubActions-Plan
+          aws-region: ${{ inputs.AWS_REGION }}
+
+      - name: Mask AWS Credentials
+        run: |
+          echo "::add-mask::${{ env.AWS_ACCESS_KEY_ID }}"
+          echo "::add-mask::${{ env.AWS_SECRET_ACCESS_KEY }}"
+          echo "::add-mask::${{ env.AWS_SESSION_TOKEN }}"
+
+          echo "SHARED_DEPLOYMENT_ROLE=${{ vars.SHARED_DEPLOYMENT_ROLE }}" >> $GITHUB_ENV
+          echo "TF_VAR_account_number=${{ env.ACTUAL_ACCOUNT_NUMBER }}" >> $GITHUB_ENV
+          echo "Deploying in ${{ env.ACTUAL_ACCOUNT_NUMBER }} account with role ${{ vars.SHARED_DEPLOYMENT_ROLE }} for environment ${{ inputs.CI_ENVIRONMENT_NAME }}..."
+
+      - name: Run OpenTofu Plan
+        run: |
+          cd "${{ inputs.WORKING_DIRECTORY }}"
+          echo "Formatting check..."
+          tofu fmt -check || echo "Formatting issues found."
+          echo "Initializing OpenTofu..."
+          tofu init -input=false -backend-config="../${{ inputs.ENVIRONMENTS_CONFIG_DIR }}/${{ inputs.CI_ENVIRONMENT_NAME }}/${{ inputs.AWS_REGION }}/backend.tfvars"
+          echo "Fixing module script permissions..."
+          find .terraform/modules -name "*.sh" -type f -exec chmod +x {} \; 2>/dev/null || echo "No shell scripts found in modules"
+          echo "Validating configuration..."
+          tofu validate
+          echo "Creating execution plan..."
+          tofu plan -input=false -out=tfplan -var-file="../${{ inputs.ENVIRONMENTS_CONFIG_DIR }}/${{ inputs.CI_ENVIRONMENT_NAME }}/${{ inputs.AWS_REGION }}/inputs.tfvars"
+          echo "Generating plan summary..."
+          PLAN_OUTPUT=$(tofu show ./tfplan)
+          echo "#### OpenTofu Plan Summary" > summary.md
+          echo "#### Plan Output:" >> summary.md
+          echo "``````" >> summary.md
+          echo "$PLAN_OUTPUT" >> summary.md
+          echo "``````" >> summary.md
+          echo "#### Generated by GitHub Actions" >> summary.md
+          cat summary.md
+
+      - name: Comment PR with plan
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          WORKING_DIRECTORY: ${{ inputs.WORKING_DIRECTORY }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const workingDir = process.env.WORKING_DIRECTORY;
+            console.log('Working directory:', workingDir);
+
+            if (!workingDir) {
+              console.log('Working directory not defined, skipping comment');
+              return;
+            }
+
+            const summaryPath = path.join(workingDir, 'summary.md');
+            console.log('Summary path:', summaryPath);
+
+            if (fs.existsSync(summaryPath)) {
+              const summary = fs.readFileSync(summaryPath, 'utf8');
+              console.log('Summary file found, posting comment...');
+              
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: summary
+              });
+              
+              console.log('Comment posted successfully');
+            } else {
+              console.log('Summary file not found at:', summaryPath);
+            }
+      - name: Upload Plan Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-artifacts-${{ inputs.AWS_REGION }}
+          path: |
+            ${{ inputs.WORKING_DIRECTORY }}/.terraform.lock.hcl
+            ${{ inputs.WORKING_DIRECTORY }}/.terraform
+            ${{ inputs.WORKING_DIRECTORY }}/tfplan
+            ${{ inputs.WORKING_DIRECTORY }}/summary.md
+          retention-days: 7
+
+  apply:
+    name: OpenTofu Apply
+    runs-on: ubuntu-22.04
+    needs: plan
+    environment: ${{ inputs.CI_ENVIRONMENT_NAME }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget git curl python3 python3-pip jq unzip bash awscli openssh-client
+          wget https://github.com/opentofu/opentofu/releases/download/v1.9.0/tofu_1.9.0_linux_amd64.zip
+          unzip -o tofu_1.9.0_linux_amd64.zip
+          sudo mv tofu /usr/local/bin/
+          rm tofu_1.9.0_linux_amd64.zip
+          pip3 install awscli
+          export PATH=$PATH:/home/runner/.local/bin
+
+      - name: Configure SSH for Git
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_AUTH_SOCK: ""
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Write SSH key
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          # Add GitHub to known hosts
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
+          # Create SSH config
+          cat > ~/.ssh/config << 'EOF'
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/id_rsa
+            StrictHostKeyChecking no
+            UserKnownHostsFile ~/.ssh/known_hosts
+            IdentitiesOnly yes
+          EOF
+          chmod 600 ~/.ssh/config
+
+          # Configure Git
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global core.sshCommand "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
+
+      - name: Get AWS Account Number
+        run: |
+          ACTUAL_ACCOUNT_NUMBER=${{vars.AWS_ACCOUNT_NUMBER}}
+
+          if [ -z "$ACTUAL_ACCOUNT_NUMBER" ]; then
+            echo "Account number not found"
+            exit 1
+          fi
+
+          echo "ACTUAL_ACCOUNT_NUMBER=${ACTUAL_ACCOUNT_NUMBER}" >> $GITHUB_ENV
+          echo "Configuring AWS credentials for account: $ACTUAL_ACCOUNT_NUMBER"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.ACTUAL_ACCOUNT_NUMBER }}:role/${{ vars.SHARED_DEPLOYMENT_ROLE }}
+          role-session-name: GitHubActions-Apply
+          aws-region: ${{ inputs.AWS_REGION }}
+
+      - name: Mask AWS Credentials
+        run: |
+          echo "::add-mask::${{ env.AWS_ACCESS_KEY_ID }}"
+          echo "::add-mask::${{ env.AWS_SECRET_ACCESS_KEY }}"
+          echo "::add-mask::${{ env.AWS_SESSION_TOKEN }}"
+
+          echo "SHARED_DEPLOYMENT_ROLE=${{ vars.SHARED_DEPLOYMENT_ROLE }}" >> $GITHUB_ENV
+          echo "TF_VAR_account_number=${{ env.ACTUAL_ACCOUNT_NUMBER }}" >> $GITHUB_ENV
+          echo "Deploying in ${{ env.ACTUAL_ACCOUNT_NUMBER }} account with role ${{ vars.SHARED_DEPLOYMENT_ROLE }} for environment ${{ inputs.CI_ENVIRONMENT_NAME }}..."
+
+      - name: Download Plan Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: plan-artifacts-${{ inputs.AWS_REGION }}
+          path: ${{ inputs.WORKING_DIRECTORY }}
+
+      - name: Apply OpenTofu Plan
+        run: |
+          cd "${{ inputs.WORKING_DIRECTORY }}"
+          echo "Reinitializing OpenTofu..."
+          tofu init -input=false -backend-config="../${{ inputs.ENVIRONMENTS_CONFIG_DIR }}/${{ inputs.CI_ENVIRONMENT_NAME }}/${{ inputs.AWS_REGION }}/backend.tfvars"
+          echo "Fixing module script permissions..."
+          find .terraform/modules -name "*.sh" -type f -exec chmod +x {} \; 2>/dev/null || echo "No shell scripts found in modules"
+          echo "Applying the OpenTofu plan..."
+          if [ -f "tfplan" ] && [ -f ".terraform.lock.hcl" ]; then
+            tofu apply -input=false -auto-approve "./tfplan"
+            echo "Apply completed successfully!"
+          else
+            echo "ERROR: Missing required files from previous stage"
+            exit 1
+          fi

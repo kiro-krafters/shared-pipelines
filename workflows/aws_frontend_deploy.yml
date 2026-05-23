@@ -1,0 +1,138 @@
+name: Deploy Frontend Application
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - stg
+          - prd
+
+      is_acgr_enabled:
+        description: "Enable ACGR deployment (true/false)"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  prepare-and-validate:
+    name: Prepare and Validate Branch
+    runs-on: ubuntu-22.04
+    outputs:
+      env: ${{ steps.set-env.outputs.env }}
+      distribution-id: ${{ steps.mapping.outputs.distribution_id }}
+      is_acgr_enabled: ${{ steps.set-env.outputs.is_acgr_enabled }}
+
+    steps:
+      - name: Validate Branch and Environment
+        id: set-env
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          IS_ACGR_ENABLED="${{ github.event.inputs.is_acgr_enabled }}"
+
+          echo "Branch: $BRANCH"
+          echo "Environment: $ENVIRONMENT"
+          echo "ACGR Enabled: $IS_ACGR_ENABLED"
+
+          case "$ENVIRONMENT" in
+            "dev")
+              echo "Any branch can deploy to dev"
+              ;;
+            "stg")
+              if [[ "$BRANCH" != "develop" ]]; then
+                echo "Error: Only 'develop' branch can deploy to Staging. Current: '$BRANCH'"
+                exit 1
+              fi
+              ;;
+            "prd")
+              if [[ "$BRANCH" != "main" ]]; then
+                echo "Error: Only 'main' branch can deploy to production. Current: '$BRANCH'"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Error: Unknown environment '$ENVIRONMENT'"
+              exit 1
+              ;;
+          esac
+
+          if [[ "$IS_ACGR_ENABLED" != "true" && "$IS_ACGR_ENABLED" != "false" ]]; then
+            echo "ERROR: is_acgr_enabled must be true or false"
+            exit 1
+          fi
+
+          echo "env=$ENVIRONMENT" >> $GITHUB_OUTPUT
+          echo "is_acgr_enabled=$IS_ACGR_ENABLED" >> $GITHUB_OUTPUT
+
+      - name: Map environment to AWS resources
+        id: mapping
+        run: |
+          case "${{ steps.set-env.outputs.env }}" in
+            dev)
+              echo "distribution_id=E1WFKC90BIH3K" >> $GITHUB_OUTPUT
+              ;;
+            stg)
+              echo "distribution_id=E3A13CZEF4990I" >> $GITHUB_OUTPUT
+              ;;
+            prd)
+              echo "distribution_id=ETK7EO1VMR1AU" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "ERROR: Unknown environment: ${{ steps.set-env.outputs.env }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+  # ------------------------------------------------------------------
+  # 1. Deploy to us-east-1 (use1) – Always
+  # ------------------------------------------------------------------
+  deploy-use1:
+    name: Deploy frontend to us-east-1 ${{ needs.prepare-and-validate.outputs.env }}
+    needs: prepare-and-validate
+    uses: CA-Bridge/ccaas-shared-pipelines/.github/workflows/aws_frontend_deploy.yml@main
+    with:
+      CI_ENVIRONMENT_NAME: ${{ needs.prepare-and-validate.outputs.env }}
+      AWS_REGION: "us-east-1"
+      REGION_PREFIX: "use1"
+      S3_BUCKET_NAME: "cb-s3-case-management-use1-${{ needs.prepare-and-validate.outputs.env }}"
+      NODE_VERSION: "24"
+      DISTRIBUTION_ID: ${{ needs.prepare-and-validate.outputs.distribution-id }}
+    secrets:
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+  # ------------------------------------------------------------------
+  # 2. Deploy to us-west-2 (usw2) – ACGR Only
+  # ------------------------------------------------------------------
+  deploy-usw2:
+    name: Deploy frontend to us-west-2 ${{ needs.prepare-and-validate.outputs.env }} (ACGR)
+    needs: [prepare-and-validate, deploy-use1]
+    if: needs.prepare-and-validate.outputs.is_acgr_enabled == 'true'
+    uses: CA-Bridge/ccaas-shared-pipelines/.github/workflows/aws_frontend_deploy.yml@main
+    with:
+      CI_ENVIRONMENT_NAME: ${{ needs.prepare-and-validate.outputs.env }}
+      AWS_REGION: "us-west-2"
+      REGION_PREFIX: "usw2"
+      S3_BUCKET_NAME: "cb-s3-case-management-usw2-${{ needs.prepare-and-validate.outputs.env }}"
+      NODE_VERSION: "24"
+      DISTRIBUTION_ID: ${{ needs.prepare-and-validate.outputs.distribution-id }}
+    secrets:
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
