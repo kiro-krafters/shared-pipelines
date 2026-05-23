@@ -57,10 +57,36 @@ jobs:
           echo "ACTUAL_ACCOUNT_NUMBER=${ACTUAL_ACCOUNT_NUMBER}" >> $GITHUB_ENV
           echo "Configuring AWS credentials for account: $ACTUAL_ACCOUNT_NUMBER"
 
+      - name: Determine Deployment Role
+        run: |
+          ENVIRONMENT="${{ inputs.CI_ENVIRONMENT_NAME }}"
+          
+          case "$ENVIRONMENT" in
+            "dev")
+              DEPLOYMENT_ROLE="${{ vars.SHARED_DEPLOYMENT_ROLE_DEV }}"
+              ;;
+            "prod")
+              DEPLOYMENT_ROLE="${{ vars.SHARED_DEPLOYMENT_ROLE_PROD }}"
+              ;;
+            *)
+              echo "Error: Unknown environment '$ENVIRONMENT'"
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$DEPLOYMENT_ROLE" ]; then
+            echo "Error: Deployment role not configured for environment '$ENVIRONMENT'"
+            echo "Please set SHARED_DEPLOYMENT_ROLE_DEV or SHARED_DEPLOYMENT_ROLE_PROD in GitHub variables"
+            exit 1
+          fi
+
+          echo "DEPLOYMENT_ROLE=${DEPLOYMENT_ROLE}" >> $GITHUB_ENV
+          echo "Using deployment role: $DEPLOYMENT_ROLE for environment: $ENVIRONMENT"
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ env.ACTUAL_ACCOUNT_NUMBER }}:role/${{ vars.SHARED_DEPLOYMENT_ROLE }}
+          role-to-assume: arn:aws:iam::${{ env.ACTUAL_ACCOUNT_NUMBER }}:role/${{ env.DEPLOYMENT_ROLE }}
           role-session-name: GitHubActions-Plan
           aws-region: ${{ inputs.AWS_REGION }}
 
@@ -177,10 +203,36 @@ jobs:
           echo "ACTUAL_ACCOUNT_NUMBER=${ACTUAL_ACCOUNT_NUMBER}" >> $GITHUB_ENV
           echo "Configuring AWS credentials for account: $ACTUAL_ACCOUNT_NUMBER"
 
+      - name: Determine Deployment Role
+        run: |
+          ENVIRONMENT="${{ inputs.CI_ENVIRONMENT_NAME }}"
+          
+          case "$ENVIRONMENT" in
+            "dev")
+              DEPLOYMENT_ROLE="${{ vars.SHARED_DEPLOYMENT_ROLE_DEV }}"
+              ;;
+            "prod")
+              DEPLOYMENT_ROLE="${{ vars.SHARED_DEPLOYMENT_ROLE_PROD }}"
+              ;;
+            *)
+              echo "Error: Unknown environment '$ENVIRONMENT'"
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$DEPLOYMENT_ROLE" ]; then
+            echo "Error: Deployment role not configured for environment '$ENVIRONMENT'"
+            echo "Please set SHARED_DEPLOYMENT_ROLE_DEV or SHARED_DEPLOYMENT_ROLE_PROD in GitHub variables"
+            exit 1
+          fi
+
+          echo "DEPLOYMENT_ROLE=${DEPLOYMENT_ROLE}" >> $GITHUB_ENV
+          echo "Using deployment role: $DEPLOYMENT_ROLE for environment: $ENVIRONMENT"
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ env.ACTUAL_ACCOUNT_NUMBER }}:role/${{ vars.SHARED_DEPLOYMENT_ROLE }}
+          role-to-assume: arn:aws:iam::${{ env.ACTUAL_ACCOUNT_NUMBER }}:role/${{ env.DEPLOYMENT_ROLE }}
           role-session-name: GitHubActions-Apply
           aws-region: ${{ inputs.AWS_REGION }}
 
@@ -190,9 +242,9 @@ jobs:
           echo "::add-mask::${{ env.AWS_SECRET_ACCESS_KEY }}"
           echo "::add-mask::${{ env.AWS_SESSION_TOKEN }}"
 
-          echo "SHARED_DEPLOYMENT_ROLE=${{ vars.SHARED_DEPLOYMENT_ROLE }}" >> $GITHUB_ENV
+          echo "SHARED_DEPLOYMENT_ROLE=${{ env.DEPLOYMENT_ROLE }}" >> $GITHUB_ENV
           echo "TF_VAR_account_number=${{ env.ACTUAL_ACCOUNT_NUMBER }}" >> $GITHUB_ENV
-          echo "Deploying in ${{ env.ACTUAL_ACCOUNT_NUMBER }} account with role ${{ vars.SHARED_DEPLOYMENT_ROLE }} for environment ${{ inputs.CI_ENVIRONMENT_NAME }}..."
+          echo "Deploying in ${{ env.ACTUAL_ACCOUNT_NUMBER }} account with role ${{ env.DEPLOYMENT_ROLE }} for environment ${{ inputs.CI_ENVIRONMENT_NAME }}..."
 
       - name: Download Plan Artifacts
         uses: actions/download-artifact@v4
